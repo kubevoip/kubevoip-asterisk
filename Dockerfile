@@ -20,6 +20,10 @@ RUN ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --with-pjpr
  && make -j"$(nproc)" && make DESTDIR=/out install
 
 FROM debian:bookworm-slim
+LABEL org.opencontainers.image.source="https://github.com/kubevoip/kubevoip-asterisk" \
+      org.opencontainers.image.title="KubeVoIP Asterisk" \
+      org.opencontainers.image.description="Asterisk runtime image for KubeVoIP" \
+      org.opencontainers.image.licenses="MIT"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libedit2 libjansson4 libsqlite3-0 libssl3 libxml2 libxslt1.1 libuuid1 tini \
  && rm -rf /var/lib/apt/lists/* \
