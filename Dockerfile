@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && groupadd --gid 1000 asterisk && useradd --uid 1000 --gid 1000 --home-dir /var/lib/asterisk asterisk
 COPY --from=builder /out/usr/ /usr/
 COPY --from=builder /out/var/lib/asterisk/ /var/lib/asterisk/
-COPY runtime/*.conf /etc/asterisk/
+COPY *.conf /etc/asterisk/
 RUN mkdir -p /var/lib/asterisk /var/log/asterisk /var/run/asterisk /var/spool/asterisk \
  && chown -R asterisk:asterisk /etc/asterisk /var/lib/asterisk /var/log/asterisk /var/run/asterisk /var/spool/asterisk
 USER 1000:1000
