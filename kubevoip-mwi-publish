@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Publish voicemail MWI state to the owning KubeVoIP SIP gateway."""
+
+from __future__ import annotations
+
+import os
+import socket
+import sys
+import time
+import uuid
+
+import psycopg
+
+
+def env(name: str) -> str:
+    value = os.environ.get(name, "")
+    if not value:
+        raise RuntimeError(f"missing environment variable {name}")
+    return value
+
+
+def message_body(user: str, gateway: str, new: int, old: int, urgent: int) -> bytes:
+    waiting = "yes" if new or urgent else "no"
+    return (
+        f"Messages-Waiting: {waiting}\r\n"
+        f"Message-Account: sip:{user}@{gateway}\r\n"
+        f"Voice-Message: {new}/{old} ({urgent}/0)\r\n"
+    ).encode()
+
+
+def publish(host: str, user: str, gateway: str, body: bytes) -> None:
+    pod_ip = os.environ.get("POD_IP", "127.0.0.1")
+    branch = uuid.uuid4().hex
+    tag = uuid.uuid4().hex[:12]
+    call_id = f"{uuid.uuid4().hex}@kubevoip-mwi"
+    request = (
+        f"PUBLISH sip:{user}@{gateway} SIP/2.0\r\n"
+        f"Via: SIP/2.0/UDP {pod_ip}:5060;branch=z9hG4bKubeVoIP{branch}\r\n"
+        "Max-Forwards: 70\r\n"
+        f"From: <sip:voicemail@{gateway}>;tag={tag}\r\n"
+        f"To: <sip:{user}@{gateway}>\r\n"
+        f"Call-ID: {call_id}\r\n"
+        "CSeq: 1 PUBLISH\r\n"
+        f"Contact: <sip:voicemail@{pod_ip}:5060>\r\n"
+        "Event: message-summary\r\n"
+        "Expires: 3600\r\n"
+        "Content-Type: application/simple-message-summary\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "\r\n"
+    ).encode() + body
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(2)
+        sock.sendto(request, (host, 5060))
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 3:
+        print("kubevoip_mwi_event status=skipped reason=missing_args", file=sys.stderr)
+        return 0
+    context = argv[1] or "default"
+    mailbox = argv[2]
+    if "@" in mailbox and not argv[1]:
+        mailbox, context = mailbox.split("@", 1)
+    namespace = os.environ.get("POD_NAMESPACE", "default")
+    conninfo = {
+        "host": env("host"),
+        "port": env("port"),
+        "dbname": env("dbname"),
+        "user": env("user"),
+        "password": env("password"),
+    }
+    query = """
+        select vm.gateway_name,
+               vm.sip_auth_username,
+               count(m.id) filter (where m.dir like '%%/INBOX') as new_messages,
+               count(m.id) filter (where m.dir like '%%/Old') as old_messages,
+               count(m.id) filter (where m.dir like '%%/Urgent') as urgent_messages
+        from kubevoip_voicemail_mailbox vm
+        left join voicemessages m on m.mailboxuser = vm.mailbox
+          and m.mailboxcontext = %s
+        where vm.mailbox = %s
+        group by vm.gateway_name, vm.sip_auth_username
+    """
+    with psycopg.connect(**conninfo) as connection:
+        rows = connection.execute(query, (context, mailbox)).fetchall()
+    for gateway, user, new, old, urgent in rows:
+        host = f"{gateway}-sip-gateway.{namespace}.svc"
+        body = message_body(user, gateway, int(new), int(old), int(urgent))
+        publish(host, user, gateway, body)
+        print(
+            "kubevoip_mwi_event "
+            f"status=published gateway={gateway} user={user} mailbox={mailbox} "
+            f"new={new} old={old} urgent={urgent} ts={int(time.time())}",
+            flush=True,
+        )
+    if not rows:
+        print(f"kubevoip_mwi_event status=skipped reason=no_mailbox_mapping mailbox={mailbox}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv))
+    except Exception as error:
+        print(f"kubevoip_mwi_event status=error error={error}", file=sys.stderr)
+        raise SystemExit(0)
